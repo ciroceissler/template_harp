@@ -61,9 +61,6 @@ module ccip_std_afu
     localparam CTL_START        = 32'h0003;
     localparam CTL_STOP         = 32'h0007;
 
-    // address used in DSM
-    localparam DSM_RUN_COMPLETE = 16'h40 >> 6;
-
     //
     // Run the entire design at the standard CCI-P frequency (400 MHz).
     //
@@ -184,7 +181,73 @@ module ccip_std_afu
     // to which it should be writing.  The address is set by writing a CSR.
     //
 
-    // TODO: write handling based o register map of HardCloud
+    // dsm_basel: device status memory - base low
+    logic is_dsm_basel;
+    assign is_dsm_basel = is_csr_write &&
+                          (mmio_req_hdr.address == t_ccip_mmioAddr'(CSR_AFU_DSM_BASEL >> 2));
+
+    // csr_read: src address
+    logic is_mem_addr_csr_read;
+    assign is_mem_addr_csr_read = is_csr_write &&
+                                  (mmio_req_hdr.address == t_ccip_mmioAddr'(CSR_SRC_ADDR >> 2));
+
+    // csr_write: dst address
+    logic is_mem_addr_csr_write;
+    assign is_mem_addr_csr_write = is_csr_write &&
+                                   (mmio_req_hdr.address == t_ccip_mmioAddr'(CSR_DST_ADDR >> 2));
+
+    // num_lines: number of cache lines
+    logic is_num_lines;
+    assign is_num_lines = is_csr_write &&
+                          (mmio_req_hdr.address == t_ccip_mmioAddr'(CSR_NUM_LINES >> 2));
+
+    // ctl: block control
+    logic is_ctl;
+    assign is_ctl = is_csr_write &&
+                    (mmio_req_hdr.address == t_ccip_mmioAddr'(CSR_CTL >> 2));
+
+    // Memory address to which this AFU will read or write.
+    t_ccip_clAddr mem_dsm;
+    t_ccip_clAddr mem_addr_read;
+    t_ccip_clAddr mem_addr_write;
+
+    logic [31:0] ctl;
+
+    always_ff @(posedge clk)
+    begin
+        if (is_dsm_basel)
+        begin
+            mem_dsm <= t_ccip_clAddr'(sRx.c0.data) >> 6;
+            $display("AFU set DSM Low");
+        end
+    end
+
+    always_ff @(posedge clk)
+    begin
+        if (is_mem_addr_csr_read)
+        begin
+            mem_addr_read <= t_ccip_clAddr'(sRx.c0.data);
+            $display("AFU set src_address");
+        end
+    end
+
+    always_ff @(posedge clk)
+    begin
+        if (is_mem_addr_csr_write)
+        begin
+            mem_addr_write <= t_ccip_clAddr'(sRx.c0.data);
+            $display("AFU set dst_address");
+        end
+    end
+
+    always_ff @(posedge clk)
+    begin
+        if (is_ctl)
+        begin
+            ctl <= sRx.c0.data[31:0];
+        end
+    end
+
 
 
     // =========================================================================
@@ -194,23 +257,148 @@ module ccip_std_afu
     // =========================================================================
 
     //
+    // States in our simple example.
+    //
+    typedef enum logic [2:0]
+    {
+        STATE_IDLE,
+        STATE_READ,
+        STATE_WAIT_READ,
+        STATE_WRITE,
+        STATE_FINISH,
+        STATE_STOP
+    }
+    t_state;
+
+    t_state state;
+
+    //
+    // Common Data
+    //
+    logic [511:0] data;
+
+    //
     // State machine
     //
 
-    // TODO: state machine logic
+    always_ff @(posedge clk)
+    begin
+        if (reset)
+        begin
+            state <= STATE_IDLE;
+        end
+        else
+        begin
+            if ((state == STATE_IDLE) && (ctl == CTL_START))
+            begin
+                state <= STATE_READ;
+            end
 
+            if ((state == STATE_READ) && !sRx.c0TxAlmFull)
+            begin
+                state <= STATE_WAIT_READ;
+            end
+
+            if ((state == STATE_WAIT_READ) &&
+                (sRx.c0.rspValid) &&
+                (sRx.c0.hdr.resp_type == eRSP_RDLINE))
+            begin
+                state <= STATE_WRITE;
+            end
+
+            if ((state == STATE_WRITE) && !sRx.c1TxAlmFull)
+            begin
+                state <= STATE_FINISH;
+            end
+
+            if ((state == STATE_FINISH) && !sRx.c1TxAlmFull)
+            begin
+                state <= STATE_STOP;
+            end
+
+            if ((state == STATE_STOP) && (ctl == CTL_STOP))
+            begin
+              state <= STATE_IDLE;
+            end
+        end
+    end
 
     //
     // Read
     //
 
-    // TODO: add read logic
+    // Construct a memory read request header.  For this AFU it is always
+    // the same, since we read to only one address.
+    t_ccip_c0_ReqMemHdr rd_hdr;
+    always_comb
+    begin
+        // Zero works for most write request header fields in this example
+        rd_hdr = t_ccip_c0_ReqMemHdr'(0);
+        // Set the read address
+        rd_hdr.address = mem_addr_read;
+    end
 
+    // Control logic for memory reads
+    always_ff @(posedge clk)
+    begin
+        if (reset)
+        begin
+            sTx.c0.valid <= 1'b0;
+        end
+        else
+        begin
+            // Request the write as long as the channel isn't full.
+            sTx.c0.valid <= ((state == STATE_READ) && !sRx.c0TxAlmFull);
+        end
+
+        sTx.c0.hdr <= rd_hdr;
+    end
+
+    // Receive data (read responses).
+    always_ff @(posedge clk)
+    begin
+        if ((sRx.c0.rspValid) && (sRx.c0.hdr.resp_type == eRSP_RDLINE))
+        begin
+            for (int i = 0; i < 32; i++)
+            begin
+              data[32*i +: 32] <= sRx.c0.data[32*i +: 32] + 10;
+            end
+        end
+    end
 
     //
     // Write
     //
 
-    // TODO: add write logic
+    // Construct a memory write request header.
+    t_ccip_c1_ReqMemHdr wr_hdr;
+    always_comb
+    begin
+        // Zero works for most write request header fields in this example
+        wr_hdr = t_ccip_c1_ReqMemHdr'(0);
+        // Set the write address
+        wr_hdr.address = (state == STATE_FINISH) ? mem_dsm + 1 : mem_addr_write;
+        // Start of packet is always set for single beat writes
+        wr_hdr.sop = 1'b1;
+    end
+
+    // Control logic for memory writes
+    always_ff @(posedge clk)
+    begin
+        if (reset)
+        begin
+            sTx.c1.valid <= 1'b0;
+        end
+        else
+        begin
+            // Request the write as long as the channel isn't full.
+            sTx.c1.valid <= ((state == STATE_FINISH || state == STATE_WRITE) &&
+                            !sRx.c1TxAlmFull);
+
+            sTx.c1.data <= (state == STATE_FINISH) ? t_ccip_clData'('h1) : data;
+        end
+
+        sTx.c1.hdr <= wr_hdr;
+    end
 
 endmodule
