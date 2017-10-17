@@ -1,6 +1,5 @@
 ${PWD}/../../${AFU}/hw/include_files/common/sys_cfg_pkg.svh
 ${PWD}/../../${AFU}/hw/wrapper.sv
-${PWD}/../../${AFU}/hw/my_hrw.sv
 ${PWD}/../../${AFU}/hw/requestor.sv
 ${PWD}/../../${AFU}/hw/ccip_std_afu.sv
 ${PWD}/../../${AFU}/hw/arbiter.sv
