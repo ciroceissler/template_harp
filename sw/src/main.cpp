@@ -4,7 +4,6 @@
 #define CL 1                 // cache line - bytes
 #define NI 64*CL/sizeof(int) // number of itens
 
-
 int main()
 {
   int A[NI];
@@ -13,7 +12,6 @@ int main()
   // TODO: modify your initilization data HERE!
   for (int i = 0; i < NI; i++)
   {
-
     A[i] = i;
   }
 
